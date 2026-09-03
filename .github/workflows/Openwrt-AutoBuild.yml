@@ -190,9 +190,9 @@ jobs:
           /bin/bash "devices/${{ matrix.target }}/$DIY_SH"
         fi
         
-        # 强制仅为 Netcore N60 Pro 生成镜像
+        # 禁用全平台型号编译，只生成 Netcore N60 Pro 固件
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
-        echo "CONFIG_TARGET_MULTI_PROFILE=y" >> .config
+        echo "CONFIG_TARGET_ALL_PROFILES=n" >> .config
         echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_netcore_n60-pro=y" >> .config
         cp -Rf ./diy/* ./ || true
 
