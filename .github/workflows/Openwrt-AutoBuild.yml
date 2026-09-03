@@ -1,6 +1,6 @@
 #=================================================
 # https://github.com/P3TERX/Actions-OpenWrt
-# Description: Build OpenWrt for Netcore N60 Pro
+# Description: Build OpenWrt for Netcore N60 Pro Only
 # Lisence: MIT
 # Author: P3TERX
 #=================================================
@@ -190,7 +190,8 @@ jobs:
           /bin/bash "devices/${{ matrix.target }}/$DIY_SH"
         fi
         
-        # 禁用全平台型号编译，只生成 Netcore N60 Pro 固件
+        # 彻底清空原有配置中勾选的其他设备，仅启用 N60 Pro
+        sed -i '/CONFIG_TARGET_DEVICE_/d' .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_ALL_PROFILES=n" >> .config
         echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_netcore_n60-pro=y" >> .config
