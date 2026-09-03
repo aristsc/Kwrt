@@ -11,7 +11,11 @@ name: Build OpenWrt
 on: 
   repository_dispatch:
   workflow_dispatch:
-
+    inputs:
+      target:
+        description: '指定编译设备'
+        required: false
+        default: 'netcore_n60-pro'
 env:
   REPO_TOKEN: ${{ secrets.TOKEN_KIDDIN9 }}
   PPPOE_USERNAME: ${{ secrets.PPPOE_USERNAME }}
