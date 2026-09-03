@@ -189,12 +189,6 @@ jobs:
           echo "/bin/bash devices/${{ matrix.target }}/$DIY_SH"
           /bin/bash "devices/${{ matrix.target }}/$DIY_SH"
         fi
-        
-        # 彻底清空原有配置中勾选的其他设备，仅启用 N60 Pro
-        sed -i '/CONFIG_TARGET_DEVICE_/d' .config
-        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
-        echo "CONFIG_TARGET_ALL_PROFILES=n" >> .config
-        echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_netcore_n60-pro=y" >> .config
         cp -Rf ./diy/* ./ || true
 
     - name: Apply patches
@@ -210,13 +204,50 @@ jobs:
     - name: Defconfig
       run: |
         cd openwrt
+        
+        # 1. 补丁打完后，从 target/linux/mediatek/image/filogic.mk 中动态提取 N60 Pro 的真实 Profile 名称
+        NETCORE_PROFILE=$(grep -E 'define Device/netcore' target/linux/mediatek/image/filogic.mk 2>/dev/null | head -n 1 | awk -F'/' '{print $2}')
+        
+        if [ -z "$NETCORE_PROFILE" ]; then
+          echo "⚠️ 警告：未在 filogic.mk 中匹配到补丁注入的 netcore Profile，尝试回退硬编码名称 netcore_n60-pro"
+          NETCORE_PROFILE="netcore_n60-pro"
+        fi
+        
+        echo "=================================================="
+        echo "检测到的 N60 Pro 设备 Profile 为: ${NETCORE_PROFILE}"
+        echo "=================================================="
+
+        # 2. 彻底移除原 config 里关于全型号编译与设备的预选项
+        sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+        sed -i '/CONFIG_TARGET_DEVICE_/d' .config
+
+        # 3. 按照 OpenWrt 标准 Kconfig 语法写回配置
+        echo "# CONFIG_TARGET_ALL_PROFILES is not set" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+        echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${NETCORE_PROFILE}=y" >> .config
+
+        # 4. 执行 defconfig 生成最终依赖项
         make defconfig
+
         if [[ ! "${{ matrix.target }}" =~ (amlogic_meson8b|armsr_armv8|bcm27xx_*|rockchip_armv8|sunxi_*|x86_*|siflower_*) ]]; then
         sed -n '/# Wireless Drivers/,/# end of Wireless Drivers/p' .config | sed -e 's/=m/=n/' >>.config
         sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
         make defconfig
         fi
-        cat .config
+
+        # 5. 安全熔断拦截：验证 .config 是否包含 CONFIG_TARGET_ALL_PROFILES=y
+        if grep -q "CONFIG_TARGET_ALL_PROFILES=y" .config; then
+          echo "❌ 发现 make defconfig 依然尝试强行开启全机型编译，启动二次清理与锁定机制..."
+          sed -i 's/CONFIG_TARGET_ALL_PROFILES=y/# CONFIG_TARGET_ALL_PROFILES is not set/' .config
+          sed -i '/CONFIG_TARGET_DEVICE_/d' .config
+          echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${NETCORE_PROFILE}=y" >> .config
+          make defconfig
+        fi
+
+        echo "=================================================="
+        echo "最终锁定编译的目标设备列表："
+        grep "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_" .config || true
+        echo "=================================================="
 
     - name: Cache
       uses: stupidloud/cachewrtbuild@main
