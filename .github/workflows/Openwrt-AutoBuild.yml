@@ -1,6 +1,6 @@
 #=================================================
 # https://github.com/P3TERX/Actions-OpenWrt
-# Description: Build OpenWrt for Netcore N60 Pro Only
+# Description: Build OpenWrt for Netcore N60 Pro Only (Purified Edition)
 # Lisence: MIT
 # Author: P3TERX
 #=================================================
@@ -191,9 +191,14 @@ jobs:
         fi
         cp -Rf ./diy/* ./ || true
 
-    - name: Apply patches
+    - name: Apply patches and Purify Makefile
       run: |
         cd openwrt
+        
+        # 1. 预清空 patches 目录中非 N60 Pro / 非 common 的多余补丁，消除 Makefile recipe 重复定义警告
+        find devices/${{ matrix.target }}/patches/ -type f ! -name "*n60-pro*" ! -name "*common*" -delete 2>/dev/null || true
+
+        # 2. 应用 N60 Pro 补丁（将 DTS 和 22-netcore-n60-pro.patch 打入系统）
         cp -rn devices/common/patches devices/${{ matrix.target }}/ 2>/dev/null || true
         if [ -n "$(ls -A devices/${{ matrix.target }}/patches/*.bin.patch 2>/dev/null)" ]; then
           git apply devices/${{ matrix.target }}/patches/*.bin.patch
@@ -201,32 +206,66 @@ jobs:
         find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 2>/dev/null | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'"
         find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 2>/dev/null | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'"
 
+        # 3. 外科手术：彻底清空 filogic.mk 里除了 Netcore N60 Pro 和 Default 之外的所有设备节点定义
+        python3 -c '
+        import os
+
+        mk_path = "target/linux/mediatek/image/filogic.mk"
+        if not os.path.exists(mk_path):
+            print("❌ 未找到 filogic.mk 文件")
+            exit(0)
+
+        with open(mk_path, "r") as f:
+            lines = f.readlines()
+
+        new_lines = []
+        skip_block = False
+
+        for line in lines:
+            if line.startswith("define Device/"):
+                dev_name = line.split("/")[1].strip()
+                if dev_name in ["Default", "FitImage"] or "netcore" in dev_name:
+                    skip_block = False
+                else:
+                    skip_block = True
+                    continue
+
+            if "call BuildDevice" in line and "netcore" not in line:
+                continue
+
+            if skip_block:
+                if line.startswith("endef"):
+                    skip_block = False
+                continue
+
+            new_lines.append(line)
+
+        with open(mk_path, "w") as f:
+            f.writelines(new_lines)
+
+        print("==================================================")
+        print("✅ filogic.mk 重构成功：源码树中已成功抹除非 Netcore 设备！")
+        print("==================================================")
+        '
+
     - name: Defconfig
       run: |
         cd openwrt
         
-        # 1. 补丁打完后，从 target/linux/mediatek/image/filogic.mk 中动态提取 N60 Pro 的真实 Profile 名称
+        # 1. 动态获取重构后剩下的 netcore 设备 Profile 名称
         NETCORE_PROFILE=$(grep -E 'define Device/netcore' target/linux/mediatek/image/filogic.mk 2>/dev/null | head -n 1 | awk -F'/' '{print $2}')
-        
-        if [ -z "$NETCORE_PROFILE" ]; then
-          echo "⚠️ 警告：未在 filogic.mk 中匹配到补丁注入的 netcore Profile，尝试回退硬编码名称 netcore_n60-pro"
-          NETCORE_PROFILE="netcore_n60-pro"
-        fi
-        
-        echo "=================================================="
-        echo "检测到的 N60 Pro 设备 Profile 为: ${NETCORE_PROFILE}"
-        echo "=================================================="
+        [ -z "$NETCORE_PROFILE" ] && NETCORE_PROFILE="netcore_n60-pro"
 
-        # 2. 彻底移除原 config 里关于全型号编译与设备的预选项
+        # 2. 清理旧 config 配置中的设备标记
         sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
         sed -i '/CONFIG_TARGET_DEVICE_/d' .config
 
-        # 3. 按照 OpenWrt 标准 Kconfig 语法写回配置
+        # 3. 写入单机型配置
         echo "# CONFIG_TARGET_ALL_PROFILES is not set" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
         echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${NETCORE_PROFILE}=y" >> .config
 
-        # 4. 执行 defconfig 生成最终依赖项
+        # 4. 生成编译配置
         make defconfig
 
         if [[ ! "${{ matrix.target }}" =~ (amlogic_meson8b|armsr_armv8|bcm27xx_*|rockchip_armv8|sunxi_*|x86_*|siflower_*) ]]; then
@@ -235,17 +274,8 @@ jobs:
         make defconfig
         fi
 
-        # 5. 安全熔断拦截：验证 .config 是否包含 CONFIG_TARGET_ALL_PROFILES=y
-        if grep -q "CONFIG_TARGET_ALL_PROFILES=y" .config; then
-          echo "❌ 发现 make defconfig 依然尝试强行开启全机型编译，启动二次清理与锁定机制..."
-          sed -i 's/CONFIG_TARGET_ALL_PROFILES=y/# CONFIG_TARGET_ALL_PROFILES is not set/' .config
-          sed -i '/CONFIG_TARGET_DEVICE_/d' .config
-          echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${NETCORE_PROFILE}=y" >> .config
-          make defconfig
-        fi
-
         echo "=================================================="
-        echo "最终锁定编译的目标设备列表："
+        echo "当前唯一生效的目标设备列表："
         grep "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_" .config || true
         echo "=================================================="
 
@@ -267,8 +297,15 @@ jobs:
         shopt -s extglob
         df -hT
         cd openwrt
-        echo -e "$(($(nproc)+1)) thread compile"
-        make -j$(($(nproc)+1)) || { log=$(mktemp);make V=s &>$log; } || { tail -50 $log; curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=❌ OpenWrt ${{ env.VERSION }} ${{ matrix.target }} 编译失败 😂" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage";df -hT;exit 1; }
+        
+        NETCORE_PROFILE=$(grep -E 'define Device/netcore' target/linux/mediatek/image/filogic.mk 2>/dev/null | head -n 1 | awk -F'/' '{print $2}')
+        [ -z "$NETCORE_PROFILE" ] && NETCORE_PROFILE="netcore_n60-pro"
+
+        echo -e "$(($(nproc)+1)) thread compile for PROFILE: ${NETCORE_PROFILE}"
+        
+        # 指定 PROFILE 限制仅打包生成 N60 Pro 固件镜像
+        make -j$(($(nproc)+1)) PROFILE="${NETCORE_PROFILE}" || { log=$(mktemp);make V=s PROFILE="${NETCORE_PROFILE}" &>$log; } || { tail -50 $log; curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=❌ OpenWrt ${{ env.VERSION }} ${{ matrix.target }} 编译失败 😂" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage";df -hT;exit 1; }
+        
         rm -rf staging_dir/toolchain-*/bin/*openwrt-linux-musl-lto-dump
         rm -rf staging_dir/toolchain-*/initial
         df -hT
