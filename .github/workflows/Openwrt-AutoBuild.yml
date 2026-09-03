@@ -1,9 +1,8 @@
 #=================================================
 # https://github.com/P3TERX/Actions-OpenWrt
-# Description: Build OpenWrt using GitHub Actions
+# Description: Build OpenWrt for Netcore N60 Pro
 # Lisence: MIT
 # Author: P3TERX
-# Blog: https://p3terx.com
 #=================================================
 
 name: Build OpenWrt
@@ -13,9 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: '指定编译设备'
+        description: '指定编译平台'
         required: false
-        default: 'netcore_n60-pro'
+        default: 'mediatek_filogic'
 
 env:
   REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -37,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: ["${{ inputs.target || github.event.client_payload.target || 'netcore_n60-pro' }}"]
+        target: ["${{ inputs.target || github.event.client_payload.target || 'mediatek_filogic' }}"]
 
     steps:
     - name: Checkout
@@ -121,11 +120,9 @@ jobs:
         TAG_DATE="$( echo ${TAG_INFO} | jq -r '.data.repository.refs.nodes[] | select(.name | startswith("v25")) | .target.tagger.date' | head -n 1)"
         if [[ $(( ($(date +%s) - $(date -d "$TAG_DATE" +%s)) / 86400 )) -lt 10 || "${{ contains(github.event.action, 'tags') }}" == "true" ]]; then
         REPO_BRANCH="$( echo ${TAG_INFO} | jq -r '.data.repository.refs.nodes[].name' | grep v25 | head -n 1)"
-        #REPO_BRANCH="openwrt-25.12"
         else
         REPO_BRANCH="openwrt-25.12"
         fi
-        #echo "CONFIG_VERSION_REPO=\"https://dl.openwrt.ai/releases/`echo $REPO_BRANCH  | cut -d . -f 1,2 | sed -e 's/^v//'`\"">>devices/common/.config
         if [[ ! "${{ env.REPO_BRANCH }}" && "$REPO_URL" == "https://github.com/openwrt/openwrt" ]]; then
             git clone $REPO_URL -b $REPO_BRANCH openwrt
         elif [[ ! "${{ env.REPO_BRANCH }}" ]]; then
@@ -177,7 +174,7 @@ jobs:
         export -f git_clone_path
         mkdir -p openwrt
         cp -rf devices/common/. openwrt/
-        cp -rf devices/${{ matrix.target }}/. openwrt/
+        [ -d "devices/${{ matrix.target }}" ] && cp -rf devices/${{ matrix.target }}/. openwrt/ || true
         cp -rf devices openwrt/
         cd openwrt
         chmod +x devices/common/$DIY_SH
@@ -192,17 +189,22 @@ jobs:
           echo "/bin/bash devices/${{ matrix.target }}/$DIY_SH"
           /bin/bash "devices/${{ matrix.target }}/$DIY_SH"
         fi
+        
+        # 强制仅为 Netcore N60 Pro 生成镜像
+        echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
+        echo "CONFIG_TARGET_MULTI_PROFILE=y" >> .config
+        echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_netcore_n60-pro=y" >> .config
         cp -Rf ./diy/* ./ || true
 
     - name: Apply patches
       run: |
         cd openwrt
-        cp -rn devices/common/patches devices/${{ matrix.target }}/
-          if [ -n "$(ls -A devices/${{ matrix.target }}/*.bin.patch 2>/dev/null)" ]; then
-            git apply devices/${{ matrix.target }}/patches/*.bin.patch
-          fi
-          find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'"
-          find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'"
+        cp -rn devices/common/patches devices/${{ matrix.target }}/ 2>/dev/null || true
+        if [ -n "$(ls -A devices/${{ matrix.target }}/patches/*.bin.patch 2>/dev/null)" ]; then
+          git apply devices/${{ matrix.target }}/patches/*.bin.patch
+        fi
+        find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 2>/dev/null | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'"
+        find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 2>/dev/null | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'"
 
     - name: Defconfig
       run: |
