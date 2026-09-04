@@ -1,6 +1,6 @@
 #=================================================
 # https://github.com/P3TERX/Actions-OpenWrt
-# Description: Build OpenWrt for Netcore N60 Pro Only (Purified Edition)
+# Description: Build OpenWrt for Netcore N60 Pro Only (Safe & Pure Edition)
 # Lisence: MIT
 # Author: P3TERX
 #=================================================
@@ -64,18 +64,6 @@ jobs:
         sed -i "1a REPO_TOKEN=${{ secrets.GITHUB_TOKEN }}" ${{ github.workspace }}/devices/common/diy.sh
         sed -i "1a TARGET=${{ matrix.target }}" ${{ github.workspace }}/devices/common/diy.sh
 
-    - name: Trigger Packages Update
-      continue-on-error: true
-      if: contains(github.event.action, 'pkg')
-      run: |
-        status=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -s "https://api.github.com/repos/kiddin9/op-packages/actions/runs" | jq -r '.workflow_runs[0].status')
-        if [[ "$status" == "completed" ]]; then
-          curl -X POST https://api.github.com/repos/kiddin9/op-packages/dispatches \
-            -H "Accept: application/vnd.github.everest-preview+json" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            --data '{"event_type": "update"}'
-        fi
-
     - name: Free disk space
       uses: coder-xiaomo/free-disk-space@main
       with:
@@ -96,7 +84,7 @@ jobs:
         gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
         python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
         llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
-        libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+        libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev u-boot-tools
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "Asia/Shanghai"
@@ -191,14 +179,11 @@ jobs:
         fi
         cp -Rf ./diy/* ./ || true
 
-    - name: Apply patches and Purify Makefile
+    - name: Apply patches safely
       run: |
         cd openwrt
         
-        # 1. 预清空 patches 目录中非 N60 Pro / 非 common 的多余补丁，消除 Makefile recipe 重复定义警告
-        find devices/${{ matrix.target }}/patches/ -type f ! -name "*n60-pro*" ! -name "*common*" -delete 2>/dev/null || true
-
-        # 2. 应用 N60 Pro 补丁（将 DTS 和 22-netcore-n60-pro.patch 打入系统）
+        # 应用补丁，但不去强行修改 filogic.mk，确保内核依赖完整
         cp -rn devices/common/patches devices/${{ matrix.target }}/ 2>/dev/null || true
         if [ -n "$(ls -A devices/${{ matrix.target }}/patches/*.bin.patch 2>/dev/null)" ]; then
           git apply devices/${{ matrix.target }}/patches/*.bin.patch
@@ -206,66 +191,24 @@ jobs:
         find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 2>/dev/null | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'"
         find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 2>/dev/null | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'"
 
-        # 3. 外科手术：彻底清空 filogic.mk 里除了 Netcore N60 Pro 和 Default 之外的所有设备节点定义
-        python3 -c '
-        import os
-
-        mk_path = "target/linux/mediatek/image/filogic.mk"
-        if not os.path.exists(mk_path):
-            print("❌ 未找到 filogic.mk 文件")
-            exit(0)
-
-        with open(mk_path, "r") as f:
-            lines = f.readlines()
-
-        new_lines = []
-        skip_block = False
-
-        for line in lines:
-            if line.startswith("define Device/"):
-                dev_name = line.split("/")[1].strip()
-                if dev_name in ["Default", "FitImage"] or "netcore" in dev_name:
-                    skip_block = False
-                else:
-                    skip_block = True
-                    continue
-
-            if "call BuildDevice" in line and "netcore" not in line:
-                continue
-
-            if skip_block:
-                if line.startswith("endef"):
-                    skip_block = False
-                continue
-
-            new_lines.append(line)
-
-        with open(mk_path, "w") as f:
-            f.writelines(new_lines)
-
-        print("==================================================")
-        print("✅ filogic.mk 重构成功：源码树中已成功抹除非 Netcore 设备！")
-        print("==================================================")
-        '
-
-    - name: Defconfig
+    - name: Strict Single Profile Defconfig
       run: |
         cd openwrt
         
-        # 1. 动态获取重构后剩下的 netcore 设备 Profile 名称
+        # 1. 提取动态 N60 Pro Profile 名称
         NETCORE_PROFILE=$(grep -E 'define Device/netcore' target/linux/mediatek/image/filogic.mk 2>/dev/null | head -n 1 | awk -F'/' '{print $2}')
         [ -z "$NETCORE_PROFILE" ] && NETCORE_PROFILE="netcore_n60-pro"
 
-        # 2. 清理旧 config 配置中的设备标记
+        # 2. 清理所有多余设备的选中状态
         sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
         sed -i '/CONFIG_TARGET_DEVICE_/d' .config
+        sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
 
-        # 3. 写入单机型配置
+        # 3. 强制写入单机型独占编译指令
         echo "# CONFIG_TARGET_ALL_PROFILES is not set" >> .config
         echo "CONFIG_TARGET_mediatek_filogic=y" >> .config
-        echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${NETCORE_PROFILE}=y" >> .config
+        echo "CONFIG_TARGET_mediatek_filogic_DEVICE_${NETCORE_PROFILE}=y" >> .config
 
-        # 4. 生成编译配置
         make defconfig
 
         if [[ ! "${{ matrix.target }}" =~ (amlogic_meson8b|armsr_armv8|bcm27xx_*|rockchip_armv8|sunxi_*|x86_*|siflower_*) ]]; then
@@ -274,8 +217,9 @@ jobs:
         make defconfig
         fi
 
+        # 验证结果
         echo "=================================================="
-        echo "当前唯一生效的目标设备列表："
+        echo "已启用的目标设备："
         grep "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_" .config || true
         echo "=================================================="
 
@@ -286,10 +230,6 @@ jobs:
         mixkey: ${{ matrix.target }}
         clean: ${{ contains(github.event.action, 'nocache') }}
         prefix: ${{ github.workspace }}/openwrt
-
-    - name: SSH connection to Actions
-      uses: kiddin9/debugger-action@master
-      if: contains(github.event.action, 'ssh')
 
     - name: Compile the firmware
       id: compile
@@ -303,8 +243,8 @@ jobs:
 
         echo -e "$(($(nproc)+1)) thread compile for PROFILE: ${NETCORE_PROFILE}"
         
-        # 指定 PROFILE 限制仅打包生成 N60 Pro 固件镜像
-        make -j$(($(nproc)+1)) PROFILE="${NETCORE_PROFILE}" || { log=$(mktemp);make V=s PROFILE="${NETCORE_PROFILE}" &>$log; } || { tail -50 $log; curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=❌ OpenWrt ${{ env.VERSION }} ${{ matrix.target }} 编译失败 😂" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage";df -hT;exit 1; }
+        # 传入 PARTLABEL / ONLY_DEVICE 参数约束编译生成范围
+        make -j$(($(nproc)+1)) DEFAULT_DEVICE="${NETCORE_PROFILE}" PARTLABEL="${NETCORE_PROFILE}" || { log=$(mktemp);make V=s DEFAULT_DEVICE="${NETCORE_PROFILE}" &>$log; } || { tail -50 $log; curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=❌ OpenWrt ${{ env.VERSION }} ${{ matrix.target }} 编译失败 😂" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage";df -hT;exit 1; }
         
         rm -rf staging_dir/toolchain-*/bin/*openwrt-linux-musl-lto-dump
         rm -rf staging_dir/toolchain-*/initial
@@ -321,19 +261,6 @@ jobs:
         Emoji=("🎉" "🤞" "✨" "🎁" "🎈" "🎄" "🎨" "💋" "🍓" "🍕" "🍉" "💐" "🌴" "🚀" "🛸" "🗽" "⛅" "🌈" "🔥" "⛄" "🐶" "🏅" "🦄" "🐤")
         echo "EMOJI=${Emoji[$[$RANDOM % ${#Emoji[@]}]]}" >> $GITHUB_ENV
 
-    - name: Deploy imagebuilder to server
-      uses: easingthemes/ssh-deploy@main
-      if: env.SSH_PRIVATE_KEY && ! contains(github.event.action, 'noser')
-      with:
-        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        ARGS: "-avr --timeout=600 --include='kwrt-imagebuilder-*' --include='kwrt-*-initramfs*' --exclude='kwrt-*'"
-        SSH_CMD_ARGS: "-o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no"
-        SOURCE: openwrt/bin/targets
-        REMOTE_HOST: ${{ secrets.SERVER_HOST }}
-        REMOTE_USER: ${{ secrets.SERVER_USERNAME }}
-        REMOTE_PORT: 22
-        TARGET: "/www/wwwroot/dl.openwrt.ai/releases/tmp/"
-
     - name: Upload firmware for artifact
       uses: actions/upload-artifact@main
       if: env.UPLOAD_FIRMWARE_FOR_ARTIFACT == 'true'
@@ -341,56 +268,3 @@ jobs:
         name: ${{ env.VERSION }}_${{ matrix.target }}
         path: |
           openwrt/bin/targets/
-
-    - name: Create release
-      id: create_release
-      if: env.REPO_TOKEN && env.UPLOAD_FIRMWARE_FOR_RELEASE == 'true'
-      continue-on-error: true
-      run: |
-        echo -e "墙内加速下载 🚀:\n" >> release.txt
-        echo -e "[腾讯云] (https://dl.openwrt.ai/firmware/${{ matrix.target }}/ ☁)\n" >> release.txt
-        [ ${{ env.WETRANS }} ] && echo -e "[WeTransfer] (${{ env.WETRANS }} 🗽)\n" >> release.txt
-        [ ${{ env.COWURL }} ] && echo -e "[奶牛上传] (${{ env.COWURL }} 🐮)\n" >> release.txt
-        [ ${{ env.NOTICE }} ] && echo -e "${{ env.NOTICE }}" >> release.txt || true
-
-    - name: Upload firmware for release
-      uses: softprops/action-gh-release@master
-      continue-on-error: true
-      if: env.REPO_TOKEN && env.UPLOAD_FIRMWARE_FOR_RELEASE == 'true'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        files: "${{ env.FIRMWARE }}/*"
-        name: ${{ env.date2 }} ${{ matrix.target }} ${{ env.EMOJI }}
-        tag_name: ${{ env.date }}_${{ matrix.target }}
-        body_path: release.txt
-
-    - name: WeChat notification
-      continue-on-error: true
-      if: env.SCKEY
-      run: |
-        # [ steps.compile.outputs.status == 'success' ] && curl https://sctapi.ftqq.com/${{ secrets.SCKEY }}.send?text=🎉OpenWrt_${{ env.VERSION }}_${{ matrix.target }}编译完成😋|| curl https://sctapi.ftqq.com/${{ secrets.SCKEY }}.send?text=❌OpenWrt_${{ env.VERSION }}_${{ matrix.target }}编译失败😂
-
-    - name: Telegram notification
-      if: env.TELEGRAM_TOKEN && ! contains(github.event.action, 'notg')
-      continue-on-error: true
-      run: |
-        curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=🎉 OpenWrt ${{ env.VERSION }} ${{ matrix.target }} 编译成功 😋  https://dl.openwrt.ai/firmware/${{ matrix.target }}/  ${{ env.COWURL }}   ${{ env.WETRANS }} 🚀" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage"
-
-    - name: Delete workflow runs
-      uses: GitRML/delete-workflow-runs@main
-      continue-on-error: true
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        retain_days: 100
-        keep_minimum_runs: 0
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      continue-on-error: true
-      if: env.UPLOAD_FIRMWARE_FOR_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 15
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
